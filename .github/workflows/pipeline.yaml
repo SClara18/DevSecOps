@@ -1,0 +1,299 @@
+# Secure CI/CD pipeline for ChronosPay (PCI-DSS CDE service)
+#
+# Layout:
+#   [secrets + sast + sca] in parallel  →  policy gate  →  build  →  image scan  →  deploy
+#
+# Target: < 6 min wall clock (budget: 8 min)
+# PCI coverage: Req.6 (SDLC), Req.8 (secrets), Req.10 (audit), Req.11 (scanning)
+
+name: chronospay-pipeline
+
+on:
+  push:
+    branches: [main, develop, "release/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents:        read
+  id-token:        write   # OIDC for GCP auth — no static service account keys
+  security-events: write   # SARIF upload
+  pull-requests:   write   # Policy gate PR comments
+
+env:
+  GAR_HOST: us-central1-docker.pkg.dev
+  GAR_REPO: payments-prod/chronospay
+  GCP_PROJECT: payments-prod
+  GCP_REGION: us-central1
+
+# ── Parallel scan fan-out (~1.5 min wall clock) ───────────────────────────────
+
+jobs:
+  secrets-scan:
+    name: secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history — gitleaks scans all commits, not just HEAD
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        with:
+          args: --config=.gitleaks.toml --report-format=json --report-path=gl.json --exit-code=1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: secrets-report
+          path: gl.json
+          retention-days: 90   # PCI audit evidence — keep for QSA requests
+
+
+  sast-scan:
+    name: sast (semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: semgrep/semgrep-action@v1
+        with:
+          config: "p/python p/owasp-top-ten p/secrets p/pci-dss"
+          generateSarif: "1"
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      # JSON output for policy gate; SARIF for GitHub Security tab
+      - run: |
+          semgrep --config p/python --config p/owasp-top-ten \
+            --json --output semgrep.json --severity ERROR --severity WARNING . || true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sast-report
+          path: semgrep.json
+          retention-days: 90
+
+
+  sca-scan:
+    name: sca (trivy fs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aquasecurity/trivy-action@a20de5420d57c4102486cdd9349b532bf5b3c8d0  # SAMPLE hash — replace with actual SHA from github.com/aquasecurity/trivy-action/commits/master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-fs.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0           # gate.py decides blocking, not trivy directly
+          ignore-unfixed: false
+          vuln-type: library
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sca-report
+          path: trivy-fs.json
+          retention-days: 90
+
+
+# ── Policy gate — single decision point (~15s) ────────────────────────────────
+
+  policy-gate:
+    name: policy gate
+    runs-on: ubuntu-latest
+    needs: [secrets-scan, sast-scan, sca-scan]
+    outputs:
+      decision: ${{ steps.run.outputs.decision }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r policy/requirements.txt
+
+      - name: evaluate
+        id: run
+        run: |
+          python policy/gate.py \
+            --secrets-report secrets-report/gl.json \
+            --sast-report    sast-report/semgrep.json \
+            --sca-report     sca-report/trivy-fs.json \
+            --output         decision.json
+        env:
+          POLICY_STRICT_MODE: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs   = require('fs');
+            const d    = JSON.parse(fs.readFileSync('decision.json'));
+            const icon = { PASS: '✅', WARN: '⚠️', BLOCK: '🚫' }[d.verdict];
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              body:         `## ${icon} Security Gate: ${d.verdict}\n\n${d.summary_md}`,
+            });
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: policy-decision
+          path: decision.json
+          retention-days: 90
+
+      - if: steps.run.outputs.decision == 'BLOCK'
+        run: |
+          echo "::error::Policy gate BLOCKED. See decision.json."
+          exit 1
+
+
+# ── Build + push (~1 min) ─────────────────────────────────────────────────────
+
+  build:
+    name: build & push
+    runs-on: ubuntu-latest
+    needs: [policy-gate]
+    if: needs.policy-gate.outputs.decision != 'BLOCK'
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - run: gcloud auth configure-docker ${{ env.GAR_HOST }} --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v5
+        id: push
+        with:
+          context: .
+          push:     true
+          tags: |
+            ${{ env.GAR_HOST }}/${{ env.GAR_REPO }}:${{ github.sha }}
+            ${{ env.GAR_HOST }}/${{ env.GAR_REPO }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          provenance: true   # SLSA provenance
+          sbom:       true   # CycloneDX SBOM
+          labels: |
+            git.commit=${{ github.sha }}
+            git.branch=${{ github.ref_name }}
+            security.scanned=true
+
+
+# ── Image scan (~1.5 min) ─────────────────────────────────────────────────────
+
+  image-scan:
+    name: image scan (trivy)
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - run: gcloud auth configure-docker ${{ env.GAR_HOST }} --quiet
+
+      - uses: aquasecurity/trivy-action@a20de5420d57c4102486cdd9349b532bf5b3c8d0  # SAMPLE hash — replace with actual SHA from github.com/aquasecurity/trivy-action/commits/master
+        with:
+          image-ref: "${{ env.GAR_HOST }}/${{ env.GAR_REPO }}:${{ github.sha }}"
+          format:    json
+          output:    trivy-image.json
+          severity:  CRITICAL,HIGH,MEDIUM
+          exit-code: 0
+          vuln-type: os,library
+
+      # Second pass for SARIF
+      - uses: aquasecurity/trivy-action@a20de5420d57c4102486cdd9349b532bf5b3c8d0  # SAMPLE hash — replace with actual SHA from github.com/aquasecurity/trivy-action/commits/master
+        with:
+          image-ref: "${{ env.GAR_HOST }}/${{ env.GAR_REPO }}:${{ github.sha }}"
+          format:    sarif
+          output:    trivy-image.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+
+      - run: |
+          python policy/gate.py \
+            --image-report trivy-image.json \
+            --output       image-decision.json \
+            --stage        image
+        env:
+          POLICY_STRICT_MODE: "true"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-scan-report
+          path: |
+            trivy-image.json
+            image-decision.json
+          retention-days: 90
+
+
+# ── Deploy to GKE (~1 min, main branch only) ──────────────────────────────────
+
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    needs: [image-scan]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: prod-cluster
+          location:     ${{ env.GCP_REGION }}
+
+      - run: |
+          IMAGE="${{ env.GAR_HOST }}/${{ env.GAR_REPO }}:${{ github.sha }}"
+          sed -i "s|IMAGE_PLACEHOLDER|${IMAGE}|g" k8s/external-secret.yaml
+          kubectl apply -f k8s/external-secret.yaml --namespace=chronospay
+          kubectl rollout status deployment/chronospay --namespace=chronospay --timeout=120s
+
+      - name: smoke test
+        run: |
+          SVC=$(kubectl get svc chronospay -n chronospay -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          curl -sf "http://${SVC}:8080/healthz" | grep '"status":"ok"'
+
+      # Audit event for PCI Req.10 — who deployed what, when
+      - run: |
+          gcloud logging write chronospay-audit \
+            "{\"event\":\"deploy\",\"sha\":\"${{ github.sha }}\",\"actor\":\"${{ github.actor }}\",\"run\":\"${{ github.run_id }}\"}" \
+            --severity=NOTICE --project=${{ env.GCP_PROJECT }}

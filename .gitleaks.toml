@@ -1,0 +1,43 @@
+# .gitleaks.toml
+# Gitleaks configuration for ChronosPay
+#
+# Extends the default ruleset with project-specific patterns and allowlists
+# files that legitimately contain secret-like strings (test fixtures, docs).
+
+title = "chronospay-gitleaks"
+
+[extend]
+# Pull in gitleaks' maintained default rules — don't redefine what already works
+useDefault = true
+
+# Extra rule for internal API key format (prefix: yn_live_ or yn_test_)
+[[rules]]
+id          = "internal-api-key"
+description = "Internal API key"
+regex       = '''yn_(live|test)_[a-zA-Z0-9]{32,}'''
+severity    = "CRITICAL"
+tags        = ["internal", "apikey"]
+
+[[rules]]
+id          = "internal-webhook-secret"
+description = "Internal webhook signing secret"
+regex       = '''ywh_[a-zA-Z0-9]{40,}'''
+severity    = "CRITICAL"
+tags        = ["internal", "webhook"]
+
+[allowlist]
+description = "Files that contain intentional secret-like strings"
+paths = [
+    # Sample scan outputs use redacted/fake credentials as examples
+    '''scan-outputs/.*\.json''',
+    # Test fixtures
+    '''tests/fixtures/.*''',
+    # This config file itself references secret patterns
+    '''\.gitleaks\.toml''',
+]
+# Redacted strings — we use these as placeholders in docs
+regexes = [
+    '''REDACTED''',
+    '''PLACEHOLDER''',
+    '''example\.com''',
+]

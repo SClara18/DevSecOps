@@ -1,0 +1,54 @@
+# .pre-commit-config.yaml
+# ChronosPay — Local pre-commit security hooks
+#
+# Catches secrets and critical issues before code leaves the developer's laptop.
+# This is the first layer of defense in depth — not a replacement for CI.
+#
+# Install: pip install pre-commit && pre-commit install
+# Manual run: pre-commit run --all-files
+
+repos:
+  # ── Secrets scanning (mirrors Gitleaks in CI) ─────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: "[PCI Req.8] Detect hardcoded secrets"
+        description: Blocks commits containing API keys, passwords, tokens
+
+  # ── Basic Python security ──────────────────────────────────────────────────
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.7
+    hooks:
+      - id: bandit
+        name: "[PCI Req.6] Python security lint (Bandit)"
+        args: ["-c", "pyproject.toml", "--severity-level", "high"]
+        files: \.py$
+
+  # ── Dependency pinning check ───────────────────────────────────────────────
+  - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
+    rev: v1.3.2
+    hooks:
+      - id: python-safety-dependencies-check
+        name: "[PCI Req.11] Check dependencies for known CVEs"
+        files: requirements.*\.txt$
+
+  # ── Dockerfile linting ────────────────────────────────────────────────────
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint
+        name: "[PCI Req.6] Dockerfile security lint"
+        args: ["--failure-threshold", "warning"]
+
+  # ── General hygiene ───────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+        name: "[PCI Req.8] Detect private keys"

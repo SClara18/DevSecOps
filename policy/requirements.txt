@@ -1,0 +1,3 @@
+# policy/requirements.txt — minimal deps for the gate, keeps install fast
+# No external HTTP calls, no heavy frameworks
+dataclasses-json==0.6.4

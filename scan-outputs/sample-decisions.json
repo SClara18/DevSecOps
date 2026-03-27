@@ -1,0 +1,227 @@
+{
+  "_meta": {
+    "description": "Sample scan outputs demonstrating ChronosPay policy gate decisions",
+    "generated": "2025-03-27T18:00:00Z",
+    "pipeline_run": "run-4821",
+    "commit": "a3f9b2c1",
+    "policy_version": "1.2.0"
+  },
+
+  "scenarios": [
+
+    {
+      "scenario": "BLOCK — Secret hardcoded in source",
+      "trigger": "Developer accidentally committed a Stripe API key",
+      "gitleaks_output": {
+        "Description": "Stripe API Key",
+        "StartLine": 42,
+        "EndLine": 42,
+        "StartColumn": 18,
+        "EndColumn": 62,
+        "Match": "sk_live_***REDACTED***",
+        "Secret": "sk_live_***REDACTED***",
+        "File": "src/config/processors.py",
+        "Commit": "a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9",
+        "Entropy": 5.21,
+        "Author": "developer@yuno.io",
+        "Email": "developer@yuno.io",
+        "Date": "2025-03-27T17:52:11Z",
+        "Message": "fix: add Stripe processor config",
+        "Tags": ["stripe", "apikey"],
+        "RuleID": "stripe-api-key",
+        "Fingerprint": "a3f9b2c1:src/config/processors.py:stripe-api-key:42"
+      },
+      "policy_decision": {
+        "verdict": "BLOCK",
+        "block_reasons": [
+          "[PCI Req.8] Secret detected at src/config/processors.py:42 — hardcoded credentials violate PCI Req. 8.2.1 and create immediate credential exposure risk in CDE."
+        ],
+        "warn_reasons": [],
+        "metrics": {
+          "total_risk_score": 100,
+          "findings_by_severity": {"CRITICAL": 1},
+          "findings_by_tool": {"gitleaks": 1},
+          "pci_relevant_count": 1,
+          "fixable_count": 1
+        }
+      },
+      "remediation": {
+        "immediate": "Rotate Stripe API key immediately — treat as compromised",
+        "code_fix": "Remove from source. Use os.environ['PROCESSOR_API_KEY'] instead.",
+        "prevention": "Pre-commit hook (see .pre-commit-config.yaml) catches this before push"
+      }
+    },
+
+    {
+      "scenario": "BLOCK — Critical CVE in cryptography library",
+      "trigger": "requirements.txt pins cryptography==38.0.0 which has CVE-2023-49083",
+      "trivy_output": {
+        "SchemaVersion": 2,
+        "Results": [
+          {
+            "Target": "requirements.txt",
+            "Class": "lang-pkgs",
+            "Type": "pip",
+            "Vulnerabilities": [
+              {
+                "VulnerabilityID": "CVE-2023-49083",
+                "PkgName": "cryptography",
+                "InstalledVersion": "38.0.0",
+                "FixedVersion": "41.0.6",
+                "Layer": {},
+                "SeveritySource": "ghsa",
+                "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2023-49083",
+                "Title": "NULL pointer dereference in PKCS12 parsing",
+                "Description": "cryptography is a package designed to expose cryptographic primitives and recipes to Python developers. Calling `load_pem_pkcs12` or `load_der_pkcs12` could lead to a NULL-pointer dereference and segfault.",
+                "Severity": "CRITICAL",
+                "CweIDs": ["CWE-476"],
+                "VendorSeverity": {"ghsa": 4, "nvd": 4},
+                "CVSS": {
+                  "nvd": {
+                    "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                    "V3Score": 7.5
+                  }
+                },
+                "References": [
+                  "https://github.com/pypa/advisory-database/tree/main/vulns/cryptography/GHSA-jfh8-c2jp-jjjc.yaml"
+                ],
+                "PublishedDate": "2023-11-29T19:15:00Z",
+                "LastModifiedDate": "2023-12-05T14:38:00Z",
+                "EPSS": {"Score": 0.12, "Percentile": 0.85}
+              }
+            ]
+          }
+        ]
+      },
+      "policy_decision": {
+        "verdict": "BLOCK",
+        "block_reasons": [
+          "[PCI Req.6/11] CVE-2023-49083 (CRITICAL) in cryptography@38.0.0 — critical vulnerability in CDE component. Fix: upgrade to 41.0.6"
+        ],
+        "warn_reasons": [],
+        "metrics": {
+          "total_risk_score": 100,
+          "findings_by_severity": {"CRITICAL": 1},
+          "findings_by_tool": {"trivy-filesystem": 1},
+          "pci_relevant_count": 1,
+          "fixable_count": 1
+        }
+      },
+      "remediation": {
+        "code_fix": "Update requirements.txt: cryptography>=41.0.6",
+        "command": "pip install --upgrade cryptography",
+        "pci_note": "cryptography library is PCI-sensitive — handles cardholder data encryption"
+      }
+    },
+
+    {
+      "scenario": "BLOCK — Container running as root",
+      "trigger": "Image scan detects USER is not set — container runs as root (UID 0)",
+      "trivy_image_output": {
+        "SchemaVersion": 2,
+        "Results": [
+          {
+            "Target": "chronospay:a3f9b2c1",
+            "Class": "config",
+            "Type": "dockerfile",
+            "Misconfigurations": [
+              {
+                "Type": "Dockerfile Security Check",
+                "ID": "DS002",
+                "AVDID": "AVD-DS-0002",
+                "Title": "Image should not be run as root",
+                "Description": "Running containers with 'root' user can cause privilege escalation issues.",
+                "Message": "Specify at least 1 USER command in Dockerfile with non-root user as argument",
+                "Namespace": "appshield.dockerfile.DS002",
+                "Query": "data.appshield.dockerfile.DS002.deny",
+                "Resolution": "Add 'USER <non root user name>' line to the Dockerfile",
+                "Severity": "CRITICAL",
+                "CauseMetadata": {
+                  "Provider": "Dockerfile",
+                  "Service": "general",
+                  "StartLine": 0,
+                  "EndLine": 0
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "policy_decision": {
+        "verdict": "BLOCK",
+        "block_reasons": [
+          "[PCI Req.6] Container image runs as root (UID 0) — violates CIS Docker Benchmark 4.1 and PCI Req. 6.2 (least privilege). Add USER 10001 to Dockerfile."
+        ],
+        "warn_reasons": []
+      },
+      "remediation": {
+        "dockerfile_fix": "Add before CMD: RUN useradd --uid 10001 chronospay && USER 10001:10001",
+        "verification": "docker inspect image --format '{{.Config.User}}' should return '10001:10001'"
+      }
+    },
+
+    {
+      "scenario": "WARN — High CVE, no known exploit",
+      "trigger": "httpx dependency has a HIGH CVE but EPSS score is 0.04 (low exploit probability)",
+      "trivy_output": {
+        "SchemaVersion": 2,
+        "Results": [
+          {
+            "Target": "requirements.txt",
+            "Class": "lang-pkgs",
+            "Vulnerabilities": [
+              {
+                "VulnerabilityID": "CVE-2024-35195",
+                "PkgName": "httpx",
+                "InstalledVersion": "0.26.0",
+                "FixedVersion": "0.27.0",
+                "Severity": "HIGH",
+                "Title": "SSRF via malicious redirect in httpx",
+                "Description": "httpx before 0.27.0 allows SSRF via following redirects to internal addresses.",
+                "EPSS": {"Score": 0.04, "Percentile": 0.71}
+              }
+            ]
+          }
+        ]
+      },
+      "policy_decision": {
+        "verdict": "WARN",
+        "block_reasons": [],
+        "warn_reasons": [
+          "CVE-2024-35195 (HIGH) in httpx@0.26.0. EPSS=0.04. Fix available: 0.27.0"
+        ],
+        "metrics": {
+          "total_risk_score": 40,
+          "findings_by_severity": {"HIGH": 1},
+          "pci_relevant_count": 1,
+          "fixable_count": 1
+        }
+      },
+      "pipeline_behavior": "Deployment proceeds. Ticket auto-created: SEC-4821. SLA: fix within 30 days."
+    },
+
+    {
+      "scenario": "PASS — Clean build",
+      "trigger": "All dependencies updated, no secrets, non-root container",
+      "summary": {
+        "gitleaks_findings": 0,
+        "semgrep_findings": 0,
+        "trivy_fs_findings": 0,
+        "trivy_image_findings": 2,
+        "trivy_image_severity": {"LOW": 2}
+      },
+      "policy_decision": {
+        "verdict": "PASS",
+        "block_reasons": [],
+        "warn_reasons": [],
+        "metrics": {
+          "total_risk_score": 4,
+          "findings_by_severity": {"LOW": 2},
+          "pci_relevant_count": 0,
+          "fixable_count": 1
+        }
+      },
+      "pipeline_behavior": "Deployment proceeds to production. Audit event emitted to GCP Logging."
+    }
+  ]
+}
